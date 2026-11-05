@@ -318,7 +318,7 @@ with st.sidebar:
     if logo_path.exists():
         st.image(
             str(logo_path),
-            use_container_width=True
+            width=150
         )
 
     st.header('Data Input')
