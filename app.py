@@ -318,7 +318,7 @@ with st.sidebar:
     if logo_path.exists():
         st.image(
             str(logo_path),
-            width=150
+            width=100
         )
 
     st.header('Data Input')
@@ -1099,8 +1099,3 @@ else:
 
 st.divider()
 
-st.caption(
-    'Data dashboard telah melalui proses cleaning. '
-    'Transaksi dengan Qty = 0 (Cancel) tidak digunakan '
-    'dalam seluruh perhitungan.'
-)
