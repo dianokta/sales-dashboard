@@ -310,6 +310,9 @@ def loss_customers(data):
 # ==========================================================
 # 6. SIDEBAR - DATA INPUT
 # ==========================================================
+logo_path = Path(__file__).parent / 'logo.webp'
+    if logo_path.exists():
+        st.image(str(logo_path), use_container_width=True)
 
 with st.sidebar:
 
