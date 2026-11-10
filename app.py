@@ -1,10 +1,11 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from urllib.parse import urlparse
 from pathlib import Path
+
 
 # ==========================================================
 # 1. CONFIGURATION
@@ -26,8 +27,22 @@ CUSTOMER_COL = 'Nama Customer'
 CHANNEL_COL = 'Channel'
 TYPE_COL = 'Nama Tipe'
 TIPE_CUSTOMER_COL = 'Tipe'
+BRANCH_COL = 'Branch'
+CODE_CUSTOMER_COL = 'Kode Customer'
 
 LINK = 'https://docs.google.com/spreadsheets/d/1_B08zOyIueu1daLN11ihiguHrblVXAOgwZw5ILF-spU/edit?usp=sharing'
+
+MONTH_NAMES = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+]
+
+QUARTER_MONTHS = {
+    1: [1, 2, 3],
+    2: [4, 5, 6],
+    3: [7, 8, 9],
+    4: [10, 11, 12]
+}
 
 
 # ==========================================================
@@ -57,8 +72,56 @@ def month_label(x):
     return pd.Period(x, freq='M').strftime('%b-%Y')
 
 
+def month_range_label(data, month_col='Bulan'):
+    if data.empty or month_col not in data.columns:
+        return 'Tidak ada data'
+
+    months = data[month_col].dropna().astype(str)
+
+    if months.empty:
+        return 'Tidak ada data'
+
+    first_month = months.min()
+    last_month = months.max()
+
+    if first_month == last_month:
+        return month_label(first_month)
+
+    return (
+        f'{month_label(first_month)} – '
+        f'{month_label(last_month)}'
+    )
+
+
 def show_chart(fig):
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+
+def pct_change(current, previous):
+    if pd.isna(previous) or previous == 0:
+        return np.nan
+
+    return ((current / previous) - 1) * 100
+
+
+def get_selected_months(quarter):
+    if quarter == 'All Quarter':
+        return list(range(1, 13))
+
+    quarter_num = int(quarter[1])
+    return QUARTER_MONTHS[quarter_num]
+
+
+def get_quarter_label(quarter_num):
+    return {
+        1: 'Jan-Mar',
+        2: 'Apr-Jun',
+        3: 'Jul-Sep',
+        4: 'Oct-Dec'
+    }[quarter_num]
 
 
 # ==========================================================
@@ -66,7 +129,6 @@ def show_chart(fig):
 # ==========================================================
 
 def monthly_summary(data):
-
     if data.empty:
         return pd.DataFrame()
 
@@ -91,32 +153,103 @@ def monthly_summary(data):
             Retur=('Retur_Val', 'sum'),
             Active_Outlet=(CUSTOMER_COL, 'nunique')
         )
-        .sort_values('Bulan')
-        .reset_index(drop=True)
     )
 
-    # Net Sales = Sales - Retur
+    # Lengkapi bulan kalender agar MoM dan YoY tepat
+    first_month = pd.Period(d['Bulan'].min(), freq='M')
+    last_month = pd.Period(d['Bulan'].max(), freq='M')
+
+    calendar = pd.period_range(
+        start=first_month,
+        end=last_month,
+        freq='M'
+    ).astype(str)
+
+    m = (
+        m.set_index('Bulan')
+        .reindex(calendar)
+        .rename_axis('Bulan')
+        .reset_index()
+    )
+
+    for col in ['Sales', 'Retur', 'Active_Outlet']:
+        m[col] = m[col].fillna(0)
+
     m['Net_Sales'] = m['Sales'] - m['Retur']
 
+    # Average per outlet untuk masing-masing jenis nilai
     m['Avg_Sales_Outlet'] = (
+        m['Sales'] /
+        m['Active_Outlet'].replace(0, np.nan)
+    )
+
+    m['Avg_Retur_Outlet'] = (
+        m['Retur'] /
+        m['Active_Outlet'].replace(0, np.nan)
+    )
+
+    m['Avg_Net_Sales_Outlet'] = (
         m['Net_Sales'] /
         m['Active_Outlet'].replace(0, np.nan)
     )
 
-    m['Sales_MoM'] = m['Net_Sales'].pct_change() * 100
-    m['Outlet_MoM'] = m['Active_Outlet'].pct_change() * 100
+    # ------------------------------------------------------
+    # MoM: bulan kalender sebelumnya
+    # ------------------------------------------------------
 
-    m['Sales_YoY'] = (
-        m['Net_Sales']
-        .div(m['Net_Sales'].shift(12).replace(0, np.nan))
-        .sub(1) * 100
-    )
+    mom_columns = [
+        ('Sales', 'Sales_MoM'),
+        ('Retur', 'Retur_MoM'),
+        ('Net_Sales', 'Net_Sales_MoM'),
+        ('Active_Outlet', 'Outlet_MoM'),
+        ('Avg_Sales_Outlet', 'Avg_MoM'),
+        ('Avg_Retur_Outlet', 'Avg_Retur_MoM'),
+        ('Avg_Net_Sales_Outlet', 'Avg_Net_MoM')
+    ]
 
-    m['Outlet_YoY'] = (
-        m['Active_Outlet']
-        .div(m['Active_Outlet'].shift(12).replace(0, np.nan))
-        .sub(1) * 100
-    )
+    for value_col, result_col in mom_columns:
+        previous = m[value_col].shift(1).replace(0, np.nan)
+
+        m[result_col] = (
+            (m[value_col] / previous) - 1
+        ) * 100
+
+    # ------------------------------------------------------
+    # YoY: bulan kalender yang sama tahun sebelumnya
+    # ------------------------------------------------------
+
+    month_lookup = m.set_index('Bulan')
+
+    previous_year_months = (
+        pd.PeriodIndex(m['Bulan'], freq='M') - 12
+    ).astype(str)
+
+    yoy_columns = [
+        ('Sales', 'Sales_YoY'),
+        ('Retur', 'Retur_YoY'),
+        ('Net_Sales', 'Net_Sales_YoY'),
+        ('Active_Outlet', 'Outlet_YoY'),
+        ('Avg_Sales_Outlet', 'Avg_YoY'),
+        ('Avg_Retur_Outlet', 'Avg_Retur_YoY'),
+        ('Avg_Net_Sales_Outlet', 'Avg_Net_YoY')
+    ]
+
+    for value_col, result_col in yoy_columns:
+        previous = (
+            month_lookup[value_col]
+            .reindex(previous_year_months)
+            .to_numpy()
+        )
+
+        previous = (
+            pd.Series(previous)
+            .replace(0, np.nan)
+            .to_numpy()
+        )
+
+        m[result_col] = (
+            (m[value_col].to_numpy() / previous) - 1
+        ) * 100
 
     return m
 
@@ -125,14 +258,11 @@ def monthly_summary(data):
 # 4. NEW OPEN OUTLET (NOO)
 # ==========================================================
 
-def new_open_outlets(data):
-
-    code_col = 'Kode Customer'
+def new_open_outlets(data, target_month=None):
+    code_col = CODE_CUSTOMER_COL
 
     if data.empty or code_col not in data.columns:
         return pd.DataFrame()
-
-    latest_month = data['Bulan'].max()
 
     sales = data[
         data['Sales/Retur'].eq('Sales')
@@ -151,86 +281,125 @@ def new_open_outlets(data):
         .str.strip()
     )
 
-    latest_sales = sales[
-        sales['Bulan'].eq(latest_month)
-    ].copy()
-
-    previous_sales = sales[
-        sales['Bulan'].lt(latest_month)
+    sales = sales[
+        sales[code_col].ne('')
     ]
 
-    previous_codes = set(
-        previous_sales[code_col].unique()
-    )
-
-    latest_sales = latest_sales[
-        ~latest_sales[code_col].isin(previous_codes)
-    ]
-
-    if latest_sales.empty:
+    if sales.empty:
         return pd.DataFrame()
 
-    if CUSTOMER_COL in latest_sales.columns:
-
-        result = (
-            latest_sales.groupby(code_col, as_index=False)
-            .agg(
-                **{
-                    'Nama Customer': (CUSTOMER_COL, 'first'),
-                    'Total Sales': (SALES_COL, 'sum')
-                }
-            )
-        )
-
-    else:
-
-        result = (
-            latest_sales.groupby(code_col, as_index=False)[SALES_COL]
-            .sum()
-            .rename(columns={SALES_COL: 'Total Sales'})
-        )
-
-    result = result.rename(
-        columns={code_col: 'Kode Customer'}
+    sales['Bulan'] = (
+        sales[DATE_COL]
+        .dt.to_period('M')
+        .astype(str)
     )
 
-    result['Total Sales'] = result['Total Sales'].map(fmt_rp)
+    if target_month is None:
+        target_month = sales['Bulan'].max()
 
-    return result.sort_values(
+    # Transaksi pertama setiap customer dari seluruh histori
+    first_transaction = (
+        sales.groupby(code_col, as_index=False)
+        .agg(
+            First_Transaction=(DATE_COL, 'min')
+        )
+    )
+
+    first_transaction['First_Period'] = (
+        first_transaction['First_Transaction']
+        .dt.to_period('M')
+        .astype(str)
+    )
+
+    # NOO hanya jika transaksi pertamanya pada bulan target
+    noo = first_transaction[
+        first_transaction['First_Period'].eq(target_month)
+    ].copy()
+
+    if noo.empty:
+        return pd.DataFrame()
+
+    # Ambil nama customer dan total sales pada bulan NOO
+    latest_sales = sales[
+        sales['Bulan'].eq(target_month)
+    ].copy()
+
+    if CUSTOMER_COL in latest_sales.columns:
+        customer_names = (
+            latest_sales.groupby(code_col)[CUSTOMER_COL]
+            .first()
+        )
+
+        noo['Nama Customer'] = (
+            noo[code_col].map(customer_names)
+        )
+
+    sales_total = (
+        latest_sales.groupby(code_col)[SALES_COL]
+        .sum()
+    )
+
+    noo['Total Sales'] = (
+        noo[code_col].map(sales_total)
+    )
+
+    noo['First_Transaction'] = (
+        noo['First_Transaction'].dt.strftime('%d-%m-%Y')
+    )
+
+    noo = noo.rename(
+        columns={
+            code_col: 'Kode Customer',
+            'First_Transaction': 'Tanggal Transaksi Pertama'
+        }
+    )
+
+    columns = [
+        'Kode Customer',
+        'Nama Customer',
+        'Tanggal Transaksi Pertama',
+        'Total Sales'
+    ]
+
+    columns = [
+        col for col in columns
+        if col in noo.columns
+    ]
+
+    noo = noo[columns].copy()
+
+    noo['Total Sales'] = noo['Total Sales'].map(fmt_rp)
+
+    return noo.sort_values(
         'Kode Customer'
     ).reset_index(drop=True)
 
 
 # ==========================================================
 # 5. LOSS CUSTOMER
-# Definisi:
-# Sales pada 2025 tetapi tidak ada Sales pada 2026
+# Tahun terbaru dibanding seluruh tahun sebelumnya
 # ==========================================================
 
 def loss_customers(data):
-
     if data.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), None, []
 
-    # Hanya transaksi Sales
     sales = data[
         data['Sales/Retur'].eq('Sales')
     ].copy()
 
     if sales.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), None, []
 
-    # Identifikasi customer
-    if 'Kode Customer' in sales.columns:
-        key_col = 'Kode Customer'
-    else:
-        key_col = CUSTOMER_COL
+    key_col = (
+        CODE_CUSTOMER_COL
+        if CODE_CUSTOMER_COL in sales.columns
+        else CUSTOMER_COL
+    )
 
     sales = sales.dropna(
         subset=[DATE_COL, key_col]
     ).copy()
-
-    sales['Tahun'] = sales[DATE_COL].dt.year
 
     sales[key_col] = (
         sales[key_col]
@@ -242,70 +411,93 @@ def loss_customers(data):
         sales[key_col].ne('')
     ]
 
-    # Customer yang pernah melakukan Sales pada 2025
-    customer_2025 = set(
-        sales.loc[
-            sales['Tahun'].eq(2025),
-            key_col
-        ].unique()
+    if sales.empty:
+        return pd.DataFrame(), None, []
+
+    # Tahun terakhir yang tersedia
+    latest_year = int(
+        sales[DATE_COL].dt.year.max()
     )
 
-    # Customer yang pernah melakukan Sales pada 2026
-    customer_2026 = set(
-        sales.loc[
-            sales['Tahun'].eq(2026),
-            key_col
-        ].unique()
-    )
-
-    # Loss Customer
-    lost_customers = customer_2025 - customer_2026
-
-    if not lost_customers:
-        return pd.DataFrame()
-
-    # Ambil transaksi Sales tahun 2025
-    lost_data = sales[
-        sales['Tahun'].eq(2025) &
-        sales[key_col].isin(lost_customers)
+    # Semua transaksi sebelum tahun terakhir
+    previous_data = sales[
+        sales[DATE_COL].dt.year < latest_year
     ].copy()
 
-    # Rekap berdasarkan customer
-    if key_col == 'Kode Customer':
+    # Transaksi pada tahun terakhir
+    latest_data = sales[
+        sales[DATE_COL].dt.year == latest_year
+    ].copy()
 
+    previous_years = sorted(
+        previous_data[DATE_COL].dt.year.unique().tolist()
+    )
+
+    previous_customers = set(
+        previous_data[key_col].unique()
+    )
+
+    latest_customers = set(
+        latest_data[key_col].unique()
+    )
+
+    # Loss = pernah transaksi sebelumnya,
+    # tetapi tidak transaksi pada tahun terakhir
+    lost_customers = (
+        previous_customers - latest_customers
+    )
+
+    if not lost_customers:
+        return pd.DataFrame(), latest_year, previous_years
+
+    lost_data = previous_data[
+        previous_data[key_col].isin(lost_customers)
+    ].copy()
+
+    if key_col == CODE_CUSTOMER_COL:
         result = (
             lost_data.groupby(key_col, as_index=False)
             .agg(
                 **{
                     'Nama Customer': (CUSTOMER_COL, 'first'),
-                    'Total Sales 2025': (SALES_COL, 'sum')
+                    'Last Transaction': (DATE_COL, 'max'),
+                    'Total Sales Previous Years': (SALES_COL, 'sum')
                 }
             )
         )
 
-    else:
-
-        result = (
-            lost_data.groupby(key_col, as_index=False)[SALES_COL]
-            .sum()
-            .rename(
-                columns={
-                    key_col: 'Nama Customer',
-                    SALES_COL: 'Total Sales 2025'
-                }
-            )
-        )
-
-    if key_col == 'Kode Customer':
         result = result.rename(
             columns={key_col: 'Kode Customer'}
         )
 
-    result['Total Sales 2025'] = (
-        result['Total Sales 2025'].map(fmt_rp)
+    else:
+        result = (
+            lost_data.groupby(key_col, as_index=False)
+            .agg(
+                **{
+                    'Last Transaction': (DATE_COL, 'max'),
+                    'Total Sales Previous Years': (SALES_COL, 'sum')
+                }
+            )
+            .rename(
+                columns={key_col: 'Nama Customer'}
+            )
+        )
+
+    result['Last Transaction'] = (
+        result['Last Transaction'].dt.strftime('%d-%m-%Y')
     )
 
-    return result.reset_index(drop=True)
+    result['Total Sales Previous Years'] = (
+        result['Total Sales Previous Years'].map(fmt_rp)
+    )
+
+    result = result.sort_values(
+        'Last Transaction',
+        ascending=False
+    ).reset_index(drop=True)
+
+    return result, latest_year, previous_years
 
 
 # ==========================================================
@@ -313,6 +505,7 @@ def loss_customers(data):
 # ==========================================================
 
 with st.sidebar:
+
     logo_path = Path(__file__).parent / 'logo.webp'
 
     if logo_path.exists():
@@ -329,18 +522,20 @@ with st.sidebar:
     )
 
     use_mapping = st.checkbox(
-        'Ambil mapping dari Google Sheets',
+        'Principal & Customer Inactive Out',
         value=True
+    )
+
+    st.markdown(
+        f'🔗 [List Principal & Customer Out]({LINK})'
     )
 
 
 if uploaded is None:
-
     st.info(
         'Upload file Excel melalui panel sebelah kiri '
         'untuk memulai dashboard.'
     )
-
     st.stop()
 
 
@@ -349,11 +544,9 @@ if uploaded is None:
 # ==========================================================
 
 try:
-
     raw = pd.read_excel(uploaded)
 
 except Exception as e:
-
     st.error(f'File gagal dibaca: {e}')
     st.stop()
 
@@ -374,11 +567,9 @@ missing = [
 ]
 
 if missing:
-
     st.error(
         f'Kolom wajib tidak ditemukan: {missing}'
     )
-
     st.stop()
 
 
@@ -386,10 +577,8 @@ if missing:
 # 8. DATA CLEANING
 # ==========================================================
 
-# Simpan data asli untuk audit
 raw_original = raw.copy()
 
-# Konversi data
 raw['Faktur'] = raw['Faktur'].astype('string')
 
 raw['Qty'] = pd.to_numeric(
@@ -407,7 +596,6 @@ raw[SALES_COL] = pd.to_numeric(
     errors='coerce'
 ).fillna(0)
 
-
 # Identifikasi Sales dan Retur
 raw['Sales/Retur'] = np.select(
     [
@@ -421,7 +609,6 @@ raw['Sales/Retur'] = np.select(
     default='Unknown'
 )
 
-
 # Identifikasi Cancel
 raw['Transaksi'] = np.where(
     raw['Qty'].eq(0),
@@ -429,18 +616,11 @@ raw['Transaksi'] = np.where(
     'Transaksi'
 )
 
-
-# Ringkasan cleaning
 total_raw = len(raw)
 
 total_cancel = int(
     raw['Transaksi'].eq('Cancel').sum()
 )
-
-total_missing_qty = int(
-    raw['Qty'].isna().sum()
-)
-
 
 # Keluarkan transaksi Cancel
 raw = raw[
@@ -462,7 +642,6 @@ mapping_message = 'Mapping tidak digunakan.'
 if use_mapping:
 
     try:
-
         principal = read_sheet(LINK, 'principal')
         customers = read_sheet(LINK, 'customers')
 
@@ -493,7 +672,6 @@ if use_mapping:
         )
 
     except Exception as e:
-
         mapping_message = f'Mapping gagal dimuat: {e}'
 
         st.warning(
@@ -517,7 +695,7 @@ with st.expander('Ringkasan data dan mapping'):
 
     st.write(mapping_message)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
 
     c1.metric(
         'Total Raw Data',
@@ -535,18 +713,12 @@ with st.expander('Ringkasan data dan mapping'):
     )
 
     c4.metric(
-        'Qty Kosong',
-        f'{total_missing_qty:,}'
-    )
-
-    c5.metric(
         'Data tanpa Mapping',
         f'{len(filtered_raw):,}'
     )
 
     st.caption(
-        'Transaksi dengan Qty = 0 dikeluarkan dari dashboard. '
-        'Qty kosong tidak otomatis dianggap Cancel.'
+        'Transaksi cancel dikeluarkan dari dashboard.'
     )
 
     st.write('Preview Raw Data:')
@@ -578,7 +750,6 @@ for col in [
     CUSTOMER_COL,
     TYPE_COL
 ]:
-
     base[col] = (
         base[col]
         .fillna('Unknown')
@@ -586,20 +757,30 @@ for col in [
     )
 
 if TIPE_CUSTOMER_COL in base.columns:
-
     base[TIPE_CUSTOMER_COL] = (
         base[TIPE_CUSTOMER_COL]
         .fillna('Unknown')
         .astype(str)
     )
 
+if BRANCH_COL in base.columns:
+    base[BRANCH_COL] = (
+        base[BRANCH_COL]
+        .fillna('Unknown')
+        .astype(str)
+    )
+
+if CODE_CUSTOMER_COL in base.columns:
+    base[CODE_CUSTOMER_COL] = (
+        base[CODE_CUSTOMER_COL]
+        .astype('string')
+        .str.strip()
+    )
 
 if base.empty:
-
     st.warning(
         'Tidak ada data valid setelah proses cleaning.'
     )
-
     st.stop()
 
 
@@ -609,17 +790,21 @@ if base.empty:
 
 st.sidebar.header('Dashboard Filters')
 
-branch_col = 'Branch'
+if BRANCH_COL in base.columns:
 
-if branch_col in base.columns:
     branch = st.sidebar.selectbox(
         'Branch',
         ['All Branch'] +
-        sorted(base[branch_col].dropna().astype(str).unique().tolist())
+        sorted(base[BRANCH_COL].unique().tolist())
     )
+
 else:
     branch = 'All Branch'
-    st.sidebar.warning("Kolom 'Branch' tidak ditemukan.")
+
+    st.sidebar.warning(
+        "Kolom 'Branch' tidak ditemukan."
+    )
+
 
 channel = st.sidebar.selectbox(
     'Channel',
@@ -649,41 +834,64 @@ tipe = st.sidebar.selectbox(
 # 13. FILTER DATA
 # ==========================================================
 
+# Filter utama, termasuk quarter
 scope = base.copy()
 
-if branch != 'All Branch' and branch_col in scope.columns:
+if branch != 'All Branch' and BRANCH_COL in scope.columns:
     scope = scope[
-        scope[branch_col].fillna('').astype(str).eq(branch)
+        scope[BRANCH_COL].eq(branch)
     ]
 
 if channel != 'All Channel':
-
     scope = scope[
         scope[CHANNEL_COL].eq(channel)
     ]
 
 if quarter != 'All Quarter':
-
     scope = scope[
-        scope['Quarter_Num'].eq(
-            int(quarter[1])
-        )
+        scope['Quarter_Num'].eq(int(quarter[1]))
     ]
 
 if tipe != 'All Tipe':
-
     scope = scope[
         scope[TYPE_COL].eq(tipe)
     ]
 
 
-# Scope untuk NOO dan Loss Customer
+# Scope KPI dan grafik
 d = scope.copy()
 
 if trx_type in ['Sales', 'Retur']:
-
     d = d[
         d['Sales/Retur'].eq(trx_type)
+    ]
+
+
+# Scope pembanding:
+# Mengikuti Branch, Channel, Nama Tipe,
+# tetapi tidak dibatasi Quarter.
+kpi_scope = base.copy()
+
+if branch != 'All Branch' and BRANCH_COL in kpi_scope.columns:
+    kpi_scope = kpi_scope[
+        kpi_scope[BRANCH_COL].eq(branch)
+    ]
+
+if channel != 'All Channel':
+    kpi_scope = kpi_scope[
+        kpi_scope[CHANNEL_COL].eq(channel)
+    ]
+
+if tipe != 'All Tipe':
+    kpi_scope = kpi_scope[
+        kpi_scope[TYPE_COL].eq(tipe)
+    ]
+
+kpi_d = kpi_scope.copy()
+
+if trx_type in ['Sales', 'Retur']:
+    kpi_d = kpi_d[
+        kpi_d['Sales/Retur'].eq(trx_type)
     ]
 
 
@@ -699,132 +907,273 @@ st.caption(
     f'Jumlah baris setelah filter: {len(d):,}'
 )
 
-if d.empty:
+all_dates = base[DATE_COL].dropna()
 
+if not all_dates.empty:
+    st.caption(
+        'Periode seluruh data: '
+        f'{all_dates.min():%d-%b-%Y} sampai '
+        f'{all_dates.max():%d-%b-%Y}'
+    )
+
+filtered_dates = d[DATE_COL].dropna()
+
+if not filtered_dates.empty:
+    st.info(
+        'Periode data sesuai filter saat ini: '
+        f'{filtered_dates.min():%d-%b-%Y} sampai '
+        f'{filtered_dates.max():%d-%b-%Y}'
+    )
+else:
+    st.warning(
+        'Tidak ada tanggal valid pada data setelah filter.'
+    )
+
+if d.empty:
     st.warning(
         'Tidak ada data yang sesuai dengan filter.'
     )
-
     st.stop()
+
+
 
 
 # ==========================================================
 # 15. MONTHLY KPI
+# MoM dan YoY SELALU mengacu pada Sales
+# Tampilan: Total Sales | Active Outlet | Average per Outlet
 # ==========================================================
 
 m = monthly_summary(d)
 
 if m.empty:
-
     st.warning('Tidak ada data untuk perhitungan KPI.')
     st.stop()
 
-latest = m.iloc[-1]
+# target_month tetap dipakai oleh analisis bulanan lain (Top 10/NOO).
+# Jangan ubah menjadi periode quarter agar bagian tersebut tetap berbasis bulan.
+target_month = d['Bulan'].max()
 
-period = month_label(latest['Bulan'])
+# KPI mengikuti quarter yang dipilih:
+# - Quarter dipilih: akumulasi Jan-Mar / Apr-Jun / Jul-Sep / Oct-Dec
+#   pada tahun terbaru yang tersedia untuk quarter tersebut.
+# - All Quarter: gunakan bulan terakhir yang tersedia.
+if quarter != 'All Quarter':
+    quarter_num = int(quarter[1])
 
+    quarter_dates = scope.loc[
+        scope['Quarter_Num'].eq(quarter_num), DATE_COL
+    ].dropna()
 
-if trx_type == 'Sales':
+    if quarter_dates.empty:
+        st.warning('Tidak ada data untuk quarter yang dipilih.')
+        st.stop()
 
-    main_value = latest['Sales']
-    main_label = 'Total Sales'
+    kpi_year = int(quarter_dates.dt.year.max())
 
-    mom = (
-        m['Sales'].pct_change().iloc[-1] * 100
-        if len(m) > 1 else np.nan
+    kpi_period_data = kpi_scope[
+        (kpi_scope[DATE_COL].dt.year.eq(kpi_year)) &
+        (kpi_scope['Quarter_Num'].eq(quarter_num))
+    ].copy()
+
+    # Filter jenis transaksi sesuai pilihan Sales/Retur.
+    if trx_type in ['Sales', 'Retur']:
+        kpi_period_data = kpi_period_data[
+            kpi_period_data['Sales/Retur'].eq(trx_type)
+        ]
+
+    quarter_start_month = (quarter_num - 1) * 3 + 1
+    period = (
+        f'{MONTH_NAMES[quarter_start_month - 1]}-'
+        f'{MONTH_NAMES[quarter_start_month + 1]} {kpi_year}'
     )
 
-    yoy = (
-        m['Sales']
-        .div(m['Sales'].shift(12).replace(0, np.nan))
-        .sub(1).iloc[-1] * 100
-        if len(m) > 12 else np.nan
+    # Total Sales pada quarter terpilih.
+    total_sales = kpi_period_data.loc[
+        kpi_period_data['Sales/Retur'].eq('Sales'), SALES_COL
+    ].sum()
+
+    # Active Outlet dihitung distinct selama seluruh quarter,
+    # bukan penjumlahan outlet aktif per bulan.
+    active_outlet = int(
+        kpi_period_data.loc[
+            kpi_period_data['Sales/Retur'].eq('Sales'), CUSTOMER_COL
+        ].nunique()
     )
 
-
-elif trx_type == 'Retur':
-
-    main_value = latest['Retur']
-    main_label = 'Total Retur'
-
-    mom = (
-        m['Retur'].pct_change().iloc[-1] * 100
-        if len(m) > 1 else np.nan
+    avg = (
+        total_sales / active_outlet
+        if active_outlet > 0 else np.nan
     )
 
-    yoy = (
-        m['Retur']
-        .div(m['Retur'].shift(12).replace(0, np.nan))
-        .sub(1).iloc[-1] * 100
-        if len(m) > 12 else np.nan
-    )
+    # Perbandingan YoY: quarter yang sama pada tahun sebelumnya.
+    previous_year_data = kpi_scope[
+        (kpi_scope[DATE_COL].dt.year.eq(kpi_year - 1)) &
+        (kpi_scope['Quarter_Num'].eq(quarter_num)) &
+        (kpi_scope['Sales/Retur'].eq('Sales'))
+    ]
 
+    previous_year_sales = previous_year_data[SALES_COL].sum()
+    yoy = pct_change(total_sales, previous_year_sales)
+
+    # Perbandingan quarter-over-quarter dengan quarter sebelumnya.
+    previous_quarter = 4 if quarter_num == 1 else quarter_num - 1
+    previous_quarter_year = kpi_year - 1 if quarter_num == 1 else kpi_year
+
+    previous_quarter_data = kpi_scope[
+        (kpi_scope[DATE_COL].dt.year.eq(previous_quarter_year)) &
+        (kpi_scope['Quarter_Num'].eq(previous_quarter)) &
+        (kpi_scope['Sales/Retur'].eq('Sales'))
+    ]
+
+    previous_quarter_sales = previous_quarter_data[SALES_COL].sum()
+    mom = pct_change(total_sales, previous_quarter_sales)
+    growth_label = 'QoQ'
 
 else:
+    # Tanpa filter quarter: KPI tetap menampilkan bulan terakhir.
+    kpi_m = monthly_summary(kpi_d)
 
-    main_value = latest['Net_Sales']
-    main_label = 'Net Sales (Sales - Retur)'
+    if kpi_m.empty or target_month not in kpi_m['Bulan'].values:
+        st.warning('Data KPI tidak tersedia untuk periode filter ini.')
+        st.stop()
 
+    latest = (
+        kpi_m[kpi_m['Bulan'].eq(target_month)]
+        .iloc[0]
+    )
+
+    period = month_label(target_month)
+    total_sales = latest['Sales']
     mom = latest['Sales_MoM']
     yoy = latest['Sales_YoY']
+    active_outlet = int(latest['Active_Outlet'])
+    avg = latest['Avg_Sales_Outlet']
+    growth_label = 'MoM'
 
-
-avg = (
-    main_value / latest['Active_Outlet']
-    if latest['Active_Outlet'] else np.nan
-)
-
+# ----------------------------------------------------------
+# KPI DISPLAY
+# ----------------------------------------------------------
 
 st.subheader(
     f'Key Performance Indicators ({period})'
 )
 
-k1, k2, k3 = st.columns(3)
+k1, k2, k3 = st.columns([1, 1, 1])
 
-k1.metric(
-    main_label,
-    fmt_rp(main_value),
-    f'MoM {fmt_pct(mom)}'
-)
+with k1:
+    st.metric(
+        label='Total Sales',
+        value=fmt_rp(total_sales),
+        delta=(
+            f'{growth_label} {fmt_pct(mom)}'
+            if pd.notna(mom) else None
+        ),
+        delta_color='normal'
+    )
 
-k2.metric(
-    'Active Outlet',
-    f"{latest['Active_Outlet']:,.0f}"
-)
+with k2:
+    st.metric(
+        label='Active Outlet',
+        value=f'{active_outlet:,}',
+        delta=None
+    )
 
-k3.metric(
-    'Average per Outlet',
-    fmt_rp(avg),
-    f'YoY {fmt_pct(yoy)}'
-)
+with k3:
+    st.metric(
+        label='Average per Outlet',
+        value=fmt_rp(avg),
+        delta=(
+            f'YoY {fmt_pct(yoy)}'
+            if pd.notna(yoy) else None
+        ),
+        delta_color='normal'
+    )
+
+
 
 
 # ==========================================================
 # 16. MONTHLY SALES TREND
+# DYNAMIC ALL YEARS
 # ==========================================================
 
 if trx_type == 'Sales':
-
     ycol = 'Sales'
-    title = 'Monthly Sales Trend'
+    chart_title = 'Monthly Sales Trend'
 
 elif trx_type == 'Retur':
-
     ycol = 'Retur'
-    title = 'Monthly Retur Trend'
+    chart_title = 'Monthly Retur Trend'
 
 else:
-
     ycol = 'Net_Sales'
-    title = 'Monthly Net Sales Trend'
+    chart_title = 'Monthly Net Sales Trend'
 
 
-fig = px.line(
-    m,
-    x='Bulan',
-    y=ycol,
-    markers=True,
-    title=title
+selected_months = get_selected_months(quarter)
+
+selected_month_names = [
+    MONTH_NAMES[i - 1] for i in selected_months
+]
+
+trend_data = m.copy()
+
+trend_data['_Date'] = pd.to_datetime(
+    trend_data['Bulan'].astype(str) + '-01',
+    errors='coerce'
+)
+
+trend_data['Year'] = trend_data['_Date'].dt.year
+trend_data['Month_Num'] = trend_data['_Date'].dt.month
+
+trend_data = trend_data[
+    trend_data['Month_Num'].isin(selected_months)
+].copy()
+
+available_years = sorted(
+    trend_data['Year'].dropna().unique().tolist()
+)
+
+trend_pivot = trend_data.pivot_table(
+    index='Month_Num',
+    columns='Year',
+    values=ycol,
+    aggfunc='sum'
+).reindex(selected_months)
+
+fig = go.Figure()
+
+for year in available_years:
+    fig.add_trace(
+        go.Scatter(
+            x=selected_month_names,
+            y=(
+                trend_pivot[year].tolist()
+                if year in trend_pivot.columns
+                else [None] * len(selected_months)
+            ),
+            name=str(int(year)),
+            mode='lines+markers',
+            connectgaps=False
+        )
+    )
+
+fig.update_layout(
+    title=(
+        f'{chart_title} '
+        f'({month_range_label(m)})'
+    ),
+    xaxis_title='Month',
+    yaxis_title=ycol.replace('_', ' '),
+    hovermode='x unified',
+    legend=dict(
+        orientation='h',
+        yanchor='bottom',
+        y=1.02,
+        xanchor='right',
+        x=1
+    )
 )
 
 show_chart(fig)
@@ -832,80 +1181,238 @@ show_chart(fig)
 
 # ==========================================================
 # 17. ACTIVE OUTLET & AVERAGE SALES TREND
+# DYNAMIC ALL YEARS
 # ==========================================================
 
 c1, c2 = st.columns(2)
 
+
+# ----------------------------------------------------------
+# ACTIVE OUTLET COMPARISON
+# ----------------------------------------------------------
+
 with c1:
 
-    show_chart(
-        px.line(
-            m,
-            x='Bulan',
-            y='Active_Outlet',
-            markers=True,
-            title='Active Outlet Trend'
+    active_data = m.copy()
+
+    active_data['_Date'] = pd.to_datetime(
+        active_data['Bulan'] + '-01',
+        errors='coerce'
+    )
+
+    active_data['Year'] = active_data['_Date'].dt.year
+    active_data['Month_Num'] = active_data['_Date'].dt.month
+
+    active_data = active_data[
+        active_data['Month_Num'].isin(selected_months)
+    ].copy()
+
+    active_years = sorted(
+        active_data['Year'].dropna().unique().tolist()
+    )
+
+    active_pivot = active_data.pivot_table(
+        index='Month_Num',
+        columns='Year',
+        values='Active_Outlet',
+        aggfunc='first'
+    ).reindex(selected_months)
+
+    fig_active = go.Figure()
+
+    for year in active_years:
+        fig_active.add_trace(
+            go.Scatter(
+                x=selected_month_names,
+                y=(
+                    active_pivot[year].tolist()
+                    if year in active_pivot.columns
+                    else [None] * len(selected_months)
+                ),
+                name=str(int(year)),
+                mode='lines+markers',
+                connectgaps=False
+            )
+        )
+
+    fig_active.update_layout(
+        title=(
+            'Active Outlet Comparison '
+            f'({month_range_label(active_data)})'
+        ),
+        xaxis_title='Month',
+        yaxis_title='Active Outlet',
+        hovermode='x unified',
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1
         )
     )
 
+    show_chart(fig_active)
+
+
+# ----------------------------------------------------------
+# AVERAGE SALES PER OUTLET
+# ----------------------------------------------------------
 
 with c2:
 
-    show_chart(
-        px.line(
-            m,
-            x='Bulan',
-            y='Avg_Sales_Outlet',
-            markers=True,
-            title='Average Sales per Active Outlet'
+    avg_chart_data = m.copy()
+
+    avg_chart_data['_Date'] = pd.to_datetime(
+        avg_chart_data['Bulan'] + '-01',
+        errors='coerce'
+    )
+
+    avg_chart_data['Year'] = avg_chart_data['_Date'].dt.year
+    avg_chart_data['Month_Num'] = avg_chart_data['_Date'].dt.month
+
+    avg_chart_data = avg_chart_data[
+        avg_chart_data['Month_Num'].isin(selected_months)
+    ].copy()
+
+    avg_years = sorted(
+        avg_chart_data['Year'].dropna().unique().tolist()
+    )
+
+    avg_pivot = avg_chart_data.pivot_table(
+        index='Month_Num',
+        columns='Year',
+        values='Avg_Sales_Outlet',
+        aggfunc='first'
+    ).reindex(selected_months)
+
+    fig_avg = go.Figure()
+
+    for year in avg_years:
+        fig_avg.add_trace(
+            go.Scatter(
+                x=selected_month_names,
+                y=(
+                    avg_pivot[year].tolist()
+                    if year in avg_pivot.columns
+                    else [None] * len(selected_months)
+                ),
+                name=str(int(year)),
+                mode='lines+markers',
+                connectgaps=False
+            )
+        )
+
+    fig_avg.update_layout(
+        title=(
+            'Average Sales per Active Outlet '
+            f'({month_range_label(m)})'
+        ),
+        xaxis_title='Month',
+        yaxis_title='Average Sales per Active Outlet',
+        hovermode='x unified',
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1
         )
     )
 
+    show_chart(fig_avg)
+
 
 # ==========================================================
-# 18. CHANNEL DISTRIBUTION
+# 18. DISTRIBUTION ANALYSIS
 # ==========================================================
 
-latest_data = d[
-    d['Bulan'].eq(latest['Bulan'])
-].copy()
+st.subheader(
+    f'Distribution Analysis ({month_range_label(m)})'
+)
+
+distribution_data = d.copy()
 
 if trx_type == 'Sales':
 
-    latest_data = latest_data[
-        latest_data['Sales/Retur'].eq('Sales')
+    distribution_data = distribution_data[
+        distribution_data['Sales/Retur'].eq('Sales')
     ]
+
+    channel_summary = (
+        distribution_data
+        .groupby(CHANNEL_COL, as_index=False)[SALES_COL]
+        .sum()
+    )
+
+    channel_summary['Display_Value'] = (
+        channel_summary[SALES_COL].abs()
+    )
 
 elif trx_type == 'Retur':
 
-    latest_data = latest_data[
-        latest_data['Sales/Retur'].eq('Retur')
+    distribution_data = distribution_data[
+        distribution_data['Sales/Retur'].eq('Retur')
     ]
 
+    channel_summary = (
+        distribution_data
+        .groupby(CHANNEL_COL, as_index=False)[SALES_COL]
+        .sum()
+    )
 
-channel_summary = (
-    latest_data.groupby(CHANNEL_COL, as_index=False)[SALES_COL]
-    .sum()
-)
-
-channel_summary['Display_Value'] = (
-    channel_summary[SALES_COL].abs()
-)
-
-if channel_summary['Display_Value'].sum() > 0:
-
-    show_chart(
-        px.pie(
-            channel_summary,
-            names=CHANNEL_COL,
-            values='Display_Value',
-            hole=0.45,
-            title=f'Distribution by Channel — {period}'
-        )
+    channel_summary['Display_Value'] = (
+        channel_summary[SALES_COL].abs()
     )
 
 else:
 
+    distribution_data['Sales_Value'] = np.where(
+        distribution_data['Sales/Retur'].eq('Sales'),
+        distribution_data[SALES_COL],
+        0
+    )
+
+    distribution_data['Retur_Value'] = np.where(
+        distribution_data['Sales/Retur'].eq('Retur'),
+        distribution_data[SALES_COL],
+        0
+    )
+
+    channel_summary = (
+        distribution_data
+        .groupby(CHANNEL_COL, as_index=False)
+        .agg(
+            Sales=('Sales_Value', 'sum'),
+            Retur=('Retur_Value', 'sum')
+        )
+    )
+
+    channel_summary['Net Sales'] = (
+        channel_summary['Sales'] -
+        channel_summary['Retur']
+    )
+
+    channel_summary['Display_Value'] = (
+        channel_summary['Net Sales'].abs()
+    )
+
+
+if (
+    not channel_summary.empty and
+    channel_summary['Display_Value'].sum() > 0
+):
+
+    fig_distribution = px.pie(
+        channel_summary,
+        names=CHANNEL_COL,
+        values='Display_Value',
+        hole=0.45
+    )
+
+    show_chart(fig_distribution)
+
+else:
     st.info(
         'Tidak ada nilai untuk distribusi Channel.'
     )
@@ -915,7 +1422,9 @@ else:
 # 19. MONTHLY PERFORMANCE
 # ==========================================================
 
-st.subheader('Monthly Performance')
+st.subheader(
+    f'Monthly Performance ({month_range_label(m)})'
+)
 
 table = m[
     [
@@ -931,7 +1440,6 @@ table = m[
     ]
 ].copy()
 
-
 table['Bulan'] = table['Bulan'].map(month_label)
 
 for col in [
@@ -940,23 +1448,18 @@ for col in [
     'Net_Sales',
     'Avg_Sales_Outlet'
 ]:
-
     table[col] = table[col].map(fmt_rp)
-
 
 for col in [
     'Sales_MoM',
     'Sales_YoY',
     'Outlet_MoM'
 ]:
-
     table[col] = table[col].map(fmt_pct)
-
 
 table['Active_Outlet'] = table[
     'Active_Outlet'
 ].map(lambda x: f'{x:,.0f}')
-
 
 table = table.rename(
     columns={
@@ -970,7 +1473,6 @@ table = table.rename(
     }
 )
 
-
 st.dataframe(
     table,
     use_container_width=True,
@@ -980,23 +1482,31 @@ st.dataframe(
 
 # ==========================================================
 # 20. TOP 10 ANALYSIS
+# Berdasarkan bulan terakhir yang tersedia
 # ==========================================================
 
-st.subheader('Top 10 Analysis')
+top10_data = d[
+    d['Bulan'].eq(target_month)
+].copy()
+
+top10_period = month_label(target_month)
+
+st.subheader(
+    f'Top 10 Analysis ({top10_period})'
+)
 
 type_col = (
     TIPE_CUSTOMER_COL
-    if TIPE_CUSTOMER_COL in d.columns
+    if TIPE_CUSTOMER_COL in top10_data.columns
     else TYPE_COL
 )
 
 c1, c2 = st.columns(2)
 
-
 with c1:
 
     top_type = (
-        d.groupby(type_col, as_index=False)[SALES_COL]
+        top10_data.groupby(type_col, as_index=False)[SALES_COL]
         .sum()
         .nlargest(10, SALES_COL)
     )
@@ -1007,15 +1517,17 @@ with c1:
             x=SALES_COL,
             y=type_col,
             orientation='h',
-            title=f'Top 10 Tipe Customer ({trx_type})'
+            title=(
+                f'Top 10 Tipe Customer '
+                f'({trx_type}) — {top10_period}'
+            )
         )
     )
-
 
 with c2:
 
     top_customer = (
-        d.groupby(CUSTOMER_COL, as_index=False)[SALES_COL]
+        top10_data.groupby(CUSTOMER_COL, as_index=False)[SALES_COL]
         .sum()
         .nlargest(10, SALES_COL)
     )
@@ -1026,87 +1538,147 @@ with c2:
             x=SALES_COL,
             y=CUSTOMER_COL,
             orientation='h',
-            title=f'Top 10 Customer ({trx_type})'
+            title=(
+                f'Top 10 Customer '
+                f'({trx_type}) — {top10_period}'
+            )
         )
     )
 
 
 # ==========================================================
 # 21. NEW OPEN OUTLET (NOO)
+# Menggunakan seluruh histori transaksi
 # ==========================================================
 
-st.subheader(f'New Open Outlet (NOO) ({period})')
+noo_sales_scope = kpi_scope[
+    kpi_scope['Sales/Retur'].eq('Sales')
+].copy()
 
-st.caption(
-    'NOO adalah Kode Customer yang pertama kali '
-    'memiliki transaksi Sales pada bulan terbaru '
-    'dalam filter yang dipilih.'
-)
+if quarter != 'All Quarter':
+    # Target bulan tetap mengikuti quarter terpilih
+    selected_noo_sales = scope[
+        scope['Sales/Retur'].eq('Sales')
+    ].copy()
+else:
+    selected_noo_sales = noo_sales_scope.copy()
 
-noo = new_open_outlets(scope)
+if not selected_noo_sales.empty:
 
-if not noo.empty:
+    noo_target_month = selected_noo_sales['Bulan'].max()
+    noo_period = month_label(noo_target_month)
 
-    st.metric(
-        'Total NOO',
-        f'{len(noo):,}'
+    st.subheader(
+        f'New Open Outlet (NOO) ({noo_period})'
     )
 
-    st.dataframe(
-        noo,
-        use_container_width=True,
-        hide_index=True
+    # Gunakan kpi_scope sebagai histori lengkap,
+    # bukan scope yang sudah dibatasi quarter.
+    noo = new_open_outlets(
+        noo_sales_scope,
+        target_month=noo_target_month
     )
+
+    if not noo.empty:
+
+        st.metric(
+            'Total NOO',
+            f'{len(noo):,}'
+        )
+
+        st.dataframe(
+            noo,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+        st.info(
+            'Tidak ada NOO pada bulan tersebut. '
+            'Customer yang sudah pernah bertransaksi '
+            'tidak dihitung sebagai NOO.'
+        )
 
 else:
 
-    if 'Kode Customer' not in scope.columns:
+    st.subheader('New Open Outlet (NOO)')
 
+    if CODE_CUSTOMER_COL not in kpi_scope.columns:
         st.warning(
             "Kolom 'Kode Customer' tidak ditemukan. "
             "Tambahkan kolom tersebut pada file raw Excel "
             "untuk menghitung NOO."
         )
-
     else:
-
         st.info(
-            'Tidak ada NOO pada bulan terakhir '
-            'berdasarkan filter yang dipilih.'
+            'Tidak ada transaksi Sales pada periode terpilih.'
         )
 
 
 # ==========================================================
 # 22. LOSS CUSTOMER REPORT
+# Tahun terbaru dibanding seluruh tahun sebelumnya
 # ==========================================================
 
-st.subheader('Loss Customer Report')
-
-st.caption(
-    'Customer yang melakukan transaksi Sales pada 2025 '
-    'tetapi tidak melakukan transaksi Sales sama sekali '
-    'selama 2026.'
+loss_quarter_label = (
+    'All Quarter'
+    if quarter == 'All Quarter'
+    else quarter
 )
 
-loss = loss_customers(scope)
+loss, loss_latest_year, loss_previous_years = (
+    loss_customers(scope)
+)
 
-if not loss.empty:
+if loss_latest_year is not None:
 
-    st.metric(
-        'Total Loss Customer',
-        f'{len(loss):,}'
+    if loss_previous_years:
+        previous_year_label = ', '.join(
+            str(year) for year in loss_previous_years
+        )
+    else:
+        previous_year_label = 'Belum ada tahun sebelumnya'
+
+    st.subheader(
+        f'Loss Customer Report '
+        f'({loss_latest_year} vs tahun sebelumnya)'
     )
 
-    st.dataframe(
-        loss,
-        use_container_width=True,
-        hide_index=True
+    st.caption(
+        f'Customer yang pernah melakukan transaksi Sales '
+        f'pada tahun {loss_latest_year}, tetapi tidak '
+        f'melakukan transaksi Sales pada tahun sebelumnya.'
     )
+
+    st.caption(
+        f'Perbandingan periode: {loss_quarter_label}'
+    )
+
+    if not loss.empty:
+
+        st.metric(
+            'Total Loss Customer',
+            f'{len(loss):,}'
+        )
+
+        st.dataframe(
+            loss,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+        st.info(
+            f'Tidak ada Loss Customer terdeteksi pada '
+            f'tahun {loss_latest_year}.'
+        )
 
 else:
 
+    st.subheader('Loss Customer Report')
+
     st.info(
-        'Tidak ada Loss Customer terdeteksi.'
+        'Tidak ada data Sales untuk menghitung Loss Customer.'
     )
 
 
@@ -1115,3 +1687,8 @@ else:
 # ==========================================================
 
 st.divider()
+
+st.caption(
+    'Sales Dashboard'
+)
+
