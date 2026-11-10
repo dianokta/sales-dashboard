@@ -916,18 +916,6 @@ if not all_dates.empty:
         f'{all_dates.max():%d-%b-%Y}'
     )
 
-filtered_dates = d[DATE_COL].dropna()
-
-if not filtered_dates.empty:
-    st.info(
-        'Periode data sesuai filter saat ini: '
-        f'{filtered_dates.min():%d-%b-%Y} sampai '
-        f'{filtered_dates.max():%d-%b-%Y}'
-    )
-else:
-    st.warning(
-        'Tidak ada tanggal valid pada data setelah filter.'
-    )
 
 if d.empty:
     st.warning(
