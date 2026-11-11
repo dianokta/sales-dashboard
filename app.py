@@ -926,10 +926,11 @@ if d.empty:
 
 
 
+
 # ==========================================================
 # 15. MONTHLY KPI
-# MoM dan YoY SELALU mengacu pada Sales
-# Tampilan: Total Sales | Active Outlet | Average per Outlet
+# KPI mengikuti pilihan Sales/Retur/Nett Sales
+# Tampilan: Total | Active Outlet | Average per Outlet
 # ==========================================================
 
 m = monthly_summary(d)
@@ -938,15 +939,43 @@ if m.empty:
     st.warning('Tidak ada data untuk perhitungan KPI.')
     st.stop()
 
-# target_month tetap dipakai oleh analisis bulanan lain (Top 10/NOO).
-# Jangan ubah menjadi periode quarter agar bagian tersebut tetap berbasis bulan.
 target_month = d['Bulan'].max()
 
-# KPI mengikuti quarter yang dipilih:
-# - Quarter dipilih: akumulasi Jan-Mar / Apr-Jun / Jul-Sep / Oct-Dec
-#   pada tahun terbaru yang tersedia untuk quarter tersebut.
-# - All Quarter: gunakan bulan terakhir yang tersedia.
+# Tentukan kolom KPI berdasarkan pilihan transaksi
+if trx_type == 'Sales':
+    value_col = 'Sales'
+    mom_col = 'Sales_MoM'
+    yoy_col = 'Sales_YoY'
+    kpi_label = 'Total Sales'
+
+elif trx_type == 'Retur':
+    value_col = 'Retur'
+    mom_col = 'Retur_MoM'
+    yoy_col = 'Retur_YoY'
+    kpi_label = 'Total Retur'
+
+else:
+    value_col = 'Net_Sales'
+    mom_col = 'Net_Sales_MoM'
+    yoy_col = 'Net_Sales_YoY'
+    kpi_label = 'Net Sales'
+
+
+# Data KPI mengikuti jenis transaksi yang dipilih
+kpi_transaction_data = kpi_scope.copy()
+
+if trx_type in ['Sales', 'Retur']:
+    kpi_transaction_data = kpi_transaction_data[
+        kpi_transaction_data['Sales/Retur'].eq(trx_type)
+    ]
+
+
+# ----------------------------------------------------------
+# QUARTER KPI
+# ----------------------------------------------------------
+
 if quarter != 'All Quarter':
+
     quarter_num = int(quarter[1])
 
     quarter_dates = scope.loc[
@@ -959,67 +988,106 @@ if quarter != 'All Quarter':
 
     kpi_year = int(quarter_dates.dt.year.max())
 
-    kpi_period_data = kpi_scope[
-        (kpi_scope[DATE_COL].dt.year.eq(kpi_year)) &
-        (kpi_scope['Quarter_Num'].eq(quarter_num))
+    kpi_period_data = kpi_transaction_data[
+        (kpi_transaction_data[DATE_COL].dt.year.eq(kpi_year)) &
+        (kpi_transaction_data['Quarter_Num'].eq(quarter_num))
     ].copy()
 
-    # Filter jenis transaksi sesuai pilihan Sales/Retur.
-    if trx_type in ['Sales', 'Retur']:
-        kpi_period_data = kpi_period_data[
-            kpi_period_data['Sales/Retur'].eq(trx_type)
-        ]
-
     quarter_start_month = (quarter_num - 1) * 3 + 1
+
     period = (
         f'{MONTH_NAMES[quarter_start_month - 1]}-'
         f'{MONTH_NAMES[quarter_start_month + 1]} {kpi_year}'
     )
 
-    # Total Sales pada quarter terpilih.
-    total_sales = kpi_period_data.loc[
-        kpi_period_data['Sales/Retur'].eq('Sales'), SALES_COL
-    ].sum()
+    # Total berdasarkan pilihan Sales/Retur/Net Sales
+    if trx_type == 'Nett Sales':
+        sales_total = kpi_period_data.loc[
+            kpi_period_data['Sales/Retur'].eq('Sales'),
+            SALES_COL
+        ].sum()
 
-    # Active Outlet dihitung distinct selama seluruh quarter,
-    # bukan penjumlahan outlet aktif per bulan.
+        retur_total = kpi_period_data.loc[
+            kpi_period_data['Sales/Retur'].eq('Retur'),
+            SALES_COL
+        ].sum()
+
+        total_value = sales_total - retur_total
+
+    else:
+        total_value = kpi_period_data[SALES_COL].sum()
+
+    # Active Outlet selama quarter
     active_outlet = int(
-        kpi_period_data.loc[
-            kpi_period_data['Sales/Retur'].eq('Sales'), CUSTOMER_COL
-        ].nunique()
+        kpi_period_data[CUSTOMER_COL].nunique()
     )
 
     avg = (
-        total_sales / active_outlet
+        total_value / active_outlet
         if active_outlet > 0 else np.nan
     )
 
-    # Perbandingan YoY: quarter yang sama pada tahun sebelumnya.
-    previous_year_data = kpi_scope[
-        (kpi_scope[DATE_COL].dt.year.eq(kpi_year - 1)) &
-        (kpi_scope['Quarter_Num'].eq(quarter_num)) &
-        (kpi_scope['Sales/Retur'].eq('Sales'))
+    # YoY: quarter yang sama tahun sebelumnya
+    previous_year_data = kpi_transaction_data[
+        (kpi_transaction_data[DATE_COL].dt.year.eq(kpi_year - 1)) &
+        (kpi_transaction_data['Quarter_Num'].eq(quarter_num))
     ]
 
-    previous_year_sales = previous_year_data[SALES_COL].sum()
-    yoy = pct_change(total_sales, previous_year_sales)
+    if trx_type == 'Nett Sales':
+        previous_year_sales = previous_year_data.loc[
+            previous_year_data['Sales/Retur'].eq('Sales'),
+            SALES_COL
+        ].sum()
 
-    # Perbandingan quarter-over-quarter dengan quarter sebelumnya.
+        previous_year_retur = previous_year_data.loc[
+            previous_year_data['Sales/Retur'].eq('Retur'),
+            SALES_COL
+        ].sum()
+
+        previous_year_value = (
+            previous_year_sales - previous_year_retur
+        )
+    else:
+        previous_year_value = previous_year_data[SALES_COL].sum()
+
+    yoy = pct_change(total_value, previous_year_value)
+
+    # QoQ: quarter sebelumnya
     previous_quarter = 4 if quarter_num == 1 else quarter_num - 1
-    previous_quarter_year = kpi_year - 1 if quarter_num == 1 else kpi_year
+    previous_quarter_year = (
+        kpi_year - 1 if quarter_num == 1 else kpi_year
+    )
 
-    previous_quarter_data = kpi_scope[
-        (kpi_scope[DATE_COL].dt.year.eq(previous_quarter_year)) &
-        (kpi_scope['Quarter_Num'].eq(previous_quarter)) &
-        (kpi_scope['Sales/Retur'].eq('Sales'))
+    previous_quarter_data = kpi_transaction_data[
+        (kpi_transaction_data[DATE_COL].dt.year.eq(previous_quarter_year)) &
+        (kpi_transaction_data['Quarter_Num'].eq(previous_quarter))
     ]
 
-    previous_quarter_sales = previous_quarter_data[SALES_COL].sum()
-    mom = pct_change(total_sales, previous_quarter_sales)
+    if trx_type == 'Nett Sales':
+        previous_sales = previous_quarter_data.loc[
+            previous_quarter_data['Sales/Retur'].eq('Sales'),
+            SALES_COL
+        ].sum()
+
+        previous_retur = previous_quarter_data.loc[
+            previous_quarter_data['Sales/Retur'].eq('Retur'),
+            SALES_COL
+        ].sum()
+
+        previous_quarter_value = previous_sales - previous_retur
+    else:
+        previous_quarter_value = previous_quarter_data[SALES_COL].sum()
+
+    mom = pct_change(total_value, previous_quarter_value)
     growth_label = 'QoQ'
 
+
+# ----------------------------------------------------------
+# MONTHLY KPI
+# ----------------------------------------------------------
+
 else:
-    # Tanpa filter quarter: KPI tetap menampilkan bulan terakhir.
+
     kpi_m = monthly_summary(kpi_d)
 
     if kpi_m.empty or target_month not in kpi_m['Bulan'].values:
@@ -1032,12 +1100,19 @@ else:
     )
 
     period = month_label(target_month)
-    total_sales = latest['Sales']
-    mom = latest['Sales_MoM']
-    yoy = latest['Sales_YoY']
+
+    total_value = latest[value_col]
+    mom = latest[mom_col]
+    yoy = latest[yoy_col]
+
     active_outlet = int(latest['Active_Outlet'])
-    avg = latest['Avg_Sales_Outlet']
+    avg = (
+        total_value / active_outlet
+        if active_outlet > 0 else np.nan
+    )
+
     growth_label = 'MoM'
+
 
 # ----------------------------------------------------------
 # KPI DISPLAY
@@ -1051,8 +1126,8 @@ k1, k2, k3 = st.columns([1, 1, 1])
 
 with k1:
     st.metric(
-        label='Total Sales',
-        value=fmt_rp(total_sales),
+        label=kpi_label,
+        value=fmt_rp(total_value),
         delta=(
             f'{growth_label} {fmt_pct(mom)}'
             if pd.notna(mom) else None
@@ -1077,7 +1152,6 @@ with k3:
         ),
         delta_color='normal'
     )
-
 
 
 
@@ -1406,15 +1480,29 @@ else:
     )
 
 
+
 # ==========================================================
 # 19. MONTHLY PERFORMANCE
+# Dynamic berdasarkan Quarter dan seluruh tahun
 # ==========================================================
 
 st.subheader(
     f'Monthly Performance ({month_range_label(m)})'
 )
 
-table = m[
+# Filter bulan berdasarkan quarter yang dipilih.
+# selected_months sudah tersedia dari Section 16.
+table_data = m.copy()
+
+table_data['_Month_Num'] = (
+    pd.PeriodIndex(table_data['Bulan'], freq='M').month
+)
+
+table_data = table_data[
+    table_data['_Month_Num'].isin(selected_months)
+].copy()
+
+table = table_data[
     [
         'Bulan',
         'Sales',
@@ -1466,6 +1554,7 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
+
 
 
 # ==========================================================
